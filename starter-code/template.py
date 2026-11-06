@@ -95,13 +95,29 @@ def call_gemini(
         max_output_tokens=max_tokens,
     )
 
-    actual_model = "gemini-3.8-flash" if model == "gemini-2.5-flash" else model
+    actual_model = "gemini-3.5-flash" if model == "gemini-2.5-flash" else model
     start_time = time.time()
-    response = client.models.generate_content(
-        model=actual_model,
-        contents=prompt,
-        config=config,
-    )
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=actual_model,
+                contents=prompt,
+                config=config,
+            )
+            break
+        except Exception as e:
+            if attempt == 2:
+                # Thử fallback sang gemini-3.5-flash-lite nếu gemini-3.5-flash bận
+                try:
+                    response = client.models.generate_content(
+                        model="gemini-3.5-flash-lite",
+                        contents=prompt,
+                        config=config,
+                    )
+                    break
+                except Exception:
+                    raise e
+            time.sleep(1.0)
     latency = time.time() - start_time
 
     output_text = response.text or ""
@@ -157,18 +173,30 @@ def compare_models(prompt: str) -> dict:
     with the same prompt and return a structured comparison dictionary.
     """
     # 1. Call gpt-4o
-    gpt4o_text, gpt4o_latency, gpt4o_usage = call_openai(prompt, model=OPENAI_MODEL)
-    gpt4o_cost = (
-        gpt4o_usage["input_tokens"] * PRICING_1M_TOKENS["gpt-4o"]["input"]
-        + gpt4o_usage["output_tokens"] * PRICING_1M_TOKENS["gpt-4o"]["output"]
-    ) / 1_000_000
+    try:
+        gpt4o_text, gpt4o_latency, gpt4o_usage = call_openai(prompt, model=OPENAI_MODEL)
+        gpt4o_cost = (
+            gpt4o_usage["input_tokens"] * PRICING_1M_TOKENS["gpt-4o"]["input"]
+            + gpt4o_usage["output_tokens"] * PRICING_1M_TOKENS["gpt-4o"]["output"]
+        ) / 1_000_000
+    except Exception as e:
+        gpt4o_text = f"[OpenAI unavailable: {e}]"
+        gpt4o_latency = 0.0
+        gpt4o_usage = {"input_tokens": 0, "output_tokens": 0}
+        gpt4o_cost = 0.0
 
     # 2. Call gpt-4o-mini
-    mini_text, mini_latency, mini_usage = call_openai(prompt, model=OPENAI_MINI_MODEL)
-    mini_cost = (
-        mini_usage["input_tokens"] * PRICING_1M_TOKENS["gpt-4o-mini"]["input"]
-        + mini_usage["output_tokens"] * PRICING_1M_TOKENS["gpt-4o-mini"]["output"]
-    ) / 1_000_000
+    try:
+        mini_text, mini_latency, mini_usage = call_openai(prompt, model=OPENAI_MINI_MODEL)
+        mini_cost = (
+            mini_usage["input_tokens"] * PRICING_1M_TOKENS["gpt-4o-mini"]["input"]
+            + mini_usage["output_tokens"] * PRICING_1M_TOKENS["gpt-4o-mini"]["output"]
+        ) / 1_000_000
+    except Exception as e:
+        mini_text = f"[OpenAI unavailable: {e}]"
+        mini_latency = 0.0
+        mini_usage = {"input_tokens": 0, "output_tokens": 0}
+        mini_cost = 0.0
 
     # 3. Call gemini-2.5-flash
     gemini_text, gemini_latency, gemini_usage = call_gemini(prompt, model=GEMINI_MODEL)
@@ -232,28 +260,42 @@ def streaming_chatbot() -> None:
                 parts=[types.Part.from_text(text=user_input)]
             ))
 
-            actual_model = "gemini-3.8-flash" if GEMINI_MODEL == "gemini-2.5-flash" else GEMINI_MODEL
-            response_stream = client.models.generate_content_stream(
-                model=actual_model,
-                contents=history,
-            )
+            actual_model = "gemini-3.5-flash" if GEMINI_MODEL == "gemini-2.5-flash" else GEMINI_MODEL
+            
+            for attempt in range(3):
+                try:
+                    response_stream = client.models.generate_content_stream(
+                        model=actual_model,
+                        contents=history,
+                    )
 
-            assistant_chunks = []
-            print("Gemini: ", end="", flush=True)
-            for chunk in response_stream:
-                chunk_text = chunk.text or ""
-                print(chunk_text, end="", flush=True)
-                assistant_chunks.append(chunk_text)
-            print("\n")
+                    assistant_chunks = []
+                    print("Gemini: ", end="", flush=True)
+                    for chunk in response_stream:
+                        chunk_text = chunk.text or ""
+                        print(chunk_text, end="", flush=True)
+                        assistant_chunks.append(chunk_text)
+                    print("\n")
 
-            history.append(types.Content(
-                role="model",
-                parts=[types.Part.from_text(text="".join(assistant_chunks))]
-            ))
+                    history.append(types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text="".join(assistant_chunks))]
+                    ))
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        print(f"\n⚠️ Gemini bận tạm thời ({e}). Đang tự động thử lại lần {attempt + 2}/3 sau {attempt + 1}s...")
+                        time.sleep(attempt + 1)
+                    else:
+                        print(f"\n❌ Lỗi phản hồi từ Gemini: {e}")
+                        if history and history[-1].role == "user":
+                            history.pop()
 
         except (KeyboardInterrupt, EOFError):
             print("\nExiting chatbot.")
             break
+        except Exception as e:
+            print(f"\n❌ Lỗi: {e}")
 
 
 # ---------------------------------------------------------------------------
